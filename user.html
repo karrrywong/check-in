@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>NFC 智能打卡</title>
+  <script src="https://cdn.jsdelivr.net/npm/bmob-js-sdk@2.2.5/dist/Bmob-2.2.5.min.js"></script>
+  <style>
+    /* 保持你的简约设计 */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, sans-serif; background: #fff; color: #1a1a1a; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .screen { display: none; flex-direction: column; align-items: center; justify-content: center; width: 100%; padding: 32px 24px; text-align: center; }
+    .screen.active { display: flex; }
+    .btn { width: 100%; max-width: 280px; height: 48px; background: #1a1a1a; color: #fff; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; }
+    .punch-circle { width: 160px; height: 160px; border-radius: 50%; background: #1a1a1a; color: #fff; border: none; font-size: 20px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-direction: column; }
+    .spinner { width: 24px; height: 24px; border: 3px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .status-msg { margin-top: 20px; color: #888; font-size: 14px; }
+  </style>
+</head>
+<body>
+
+  <!-- 1. 姓名录入 -->
+  <div class="screen" id="screen-setup">
+    <div style="font-size: 24px; margin-bottom: 24px;">👋 欢迎使用</div>
+    <input style="width:100%; max-width:280px; height:48px; border:1px solid #ddd; border-radius:10px; text-align:center; margin-bottom:20px;" id="name-input" type="text" placeholder="请输入你的姓名" />
+    <button class="btn" onclick="saveName()">确认并保存</button>
+  </div>
+
+  <!-- 2. 打卡主界面 -->
+  <div class="screen" id="screen-punch">
+    <div id="greeting" style="color: #888; margin-bottom: 8px;">你好</div>
+    <div id="date-label" style="font-size: 13px; color: #bbb; margin-bottom: 40px;"></div>
+    <button class="punch-circle" id="punch-btn" onclick="startPunch('Manual')">
+      <span id="btn-text">立即打卡</span>
+    </button>
+    <div id="status-text" class="status-msg"></div>
+  </div>
+
+<script>
+  // 初始化 Bmob (已填入你的 Key)
+  Bmob.initialize("50e71adc8989ba089e9efb08c6dd69f0", "e7bbe051480c6b7668d07dfcbe5b44b5");
+
+  const KEY_NAME = "ck_user_name";
+
+  function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  }
+
+  async function saveName() {
+    const name = document.getElementById('name-input').value.trim();
+    if (!name) return;
+    localStorage.setItem(KEY_NAME, name);
+    // 自动同步成员表
+    const q = Bmob.Query("MemberNames");
+    q.set("name", name);
+    await q.save();
+    location.reload();
+  }
+
+  async function startPunch(method) {
+    const btnText = document.getElementById('btn-text');
+    const statusText = document.getElementById('status-text');
+    document.getElementById('punch-btn').disabled = true;
+    btnText.innerHTML = '<div class="spinner"></div>';
+    statusText.innerText = method === 'NFC' ? "NFC 感应成功，正在定位..." : "正在定位...";
+
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      try {
+        // 1. 获取云端围栏
+        const fRes = await Bmob.Query("FenceConfig").find();
+        const fence = fRes[0];
+        
+        // 2. 距离计算
+        const dist = Math.round(calcDist(pos.coords.latitude, pos.coords.longitude, fence.lat, fence.lng));
+        if (dist > fence.radius) {
+          alert(`打卡失败！你不在考勤范围内（距考勤点 ${dist} 米）`);
+          location.reload();
+          return;
+        }
+
+        // 3. 写入云端 PunchRecords
+        const punch = Bmob.Query("PunchRecords");
+        punch.set("name", localStorage.getItem(KEY_NAME));
+        punch.set("punchDate", new Date().toISOString().split('T')[0]);
+        punch.set("punchTime", Date.now());
+        punch.set("method", method); // 核心：记录打卡方式
+        await punch.save();
+
+        alert(`打卡成功！方式：${method}\n时间：${new Date().toLocaleTimeString()}`);
+        location.reload();
+
+      } catch (e) { alert("网络错误: " + e.message); location.reload(); }
+    }, (err) => { alert("定位获取失败，请确认开启 GPS"); location.reload(); }, { enableHighAccuracy: true });
+  }
+
+  function calcDist(lat1, lng1, lat2, lng2) {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  window.onload = () => {
+    const name = localStorage.getItem(KEY_NAME);
+    if (name) {
+      document.getElementById('greeting').textContent = "你好，" + name;
+      document.getElementById('date-label').textContent = new Date().toLocaleDateString();
+      showScreen('screen-punch');
+
+      // --- NFC 自动识别逻辑 ---
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('from') === 'nfc') {
+        setTimeout(() => startPunch('NFC'), 1000); // 1秒后自动触发
+      }
+    } else {
+      showScreen('screen-setup');
+    }
+  };
+</script>
+</body>
+</html>

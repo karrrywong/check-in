@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>打卡后台</title>
+  <script src="https://cdn.jsdelivr.net/npm/bmob-js-sdk@2.2.5/dist/Bmob-2.2.5.min.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    /* 管理端样式优化 */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #f5f5f5; padding-bottom: 80px; }
+    .page { display: none; max-width: 500px; margin: 0 auto; padding: 20px; }
+    .page.active { display: block; }
+    .card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .header { font-size: 20px; font-weight: bold; margin-bottom: 20px; text-align: center; }
+    input { width: 100%; height: 44px; border: 1px solid #ddd; border-radius: 8px; padding: 0 12px; margin-bottom: 12px; outline: none; }
+    .btn { width: 100%; height: 44px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; }
+    .btn-dark { background: #1a1a1a; color: #fff; }
+    .tab-bar { position: fixed; bottom: 0; left: 0; right: 0; background: #fff; border-top: 1px solid #eee; display: flex; height: 60px; align-items: center; }
+    .tab-item { flex: 1; text-align: center; color: #999; font-size: 12px; cursor: pointer; }
+    .tab-item.active { color: #1a1a1a; font-weight: bold; }
+    #map { width: 100%; height: 250px; border-radius: 12px; margin-bottom: 12px; }
+    .list-item { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f9f9f9; font-size: 14px; }
+    .badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .badge-done { background: #e6f7ed; color: #1a7f3c; }
+    .badge-none { background: #f5f5f5; color: #999; }
+  </style>
+</head>
+<body>
+
+  <!-- 1. 登录页 -->
+  <div class="page active" id="page-login">
+    <div class="header">后台管理</div>
+    <div class="card">
+      <input id="adm-user" type="text" placeholder="账号" />
+      <input id="adm-pass" type="password" placeholder="密码" />
+      <button class="btn btn-dark" onclick="login()">登录</button>
+    </div>
+  </div>
+
+  <!-- 2. 名单页 -->
+  <div class="page" id="page-list">
+    <div class="header">打卡名单</div>
+    <input type="date" id="view-date" onchange="renderList()" />
+    <div id="stat" style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:15px;"></div>
+    <div class="card" id="list-container">加载中...</div>
+  </div>
+
+  <!-- 3. 围栏页 -->
+  <div class="page" id="page-fence">
+    <div class="header">围栏设置</div>
+    <div id="map"></div>
+    <div class="card">
+      <label style="font-size: 12px; color: #999;">半径 (米)</label>
+      <input type="number" id="radius" value="200" />
+      <button class="btn btn-dark" onclick="saveFence()">保存云端围栏</button>
+    </div>
+  </div>
+
+  <!-- 4. 成员页 -->
+  <div class="page" id="page-members">
+    <div class="header">成员管理</div>
+    <div class="card">
+      <input id="new-name" placeholder="手动添加姓名" />
+      <button class="btn btn-dark" onclick="addMember()">添加成员</button>
+    </div>
+    <div class="card" id="member-list"></div>
+  </div>
+
+  <!-- 导航 -->
+  <div class="tab-bar" id="tab-bar" style="display: none;">
+    <div class="tab-item active" onclick="switchTab('list')">名单</div>
+    <div class="tab-item" onclick="switchTab('fence')">围栏</div>
+    <div class="tab-item" onclick="switchTab('members')">成员</div>
+  </div>
+
+<script>
+  Bmob.initialize("50e71adc8989ba089e9efb08c6dd69f0", "e7bbe051480c6b7668d07dfcbe5b44b5");
+
+  let map, circle, marker;
+  let currentLat = 39.9, currentLng = 116.4;
+
+  function login() {
+    const u = document.getElementById('adm-user').value;
+    const p = document.getElementById('adm-pass').value;
+    if (u === '十六' && p === '20061220') {
+      document.getElementById('page-login').classList.remove('active');
+      document.getElementById('tab-bar').style.display = 'flex';
+      switchTab('list');
+    } else { alert('密码错误'); }
+  }
+
+  function switchTab(id) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-item').forEach(t => t.classList.remove('active'));
+    document.getElementById('page-' + id).classList.add('active');
+    if (id === 'list') renderList();
+    if (id === 'members') renderMembers();
+    if (id === 'fence') initMap();
+  }
+
+  async function renderList() {
+    const dateInput = document.getElementById('view-date');
+    if (!dateInput.value) dateInput.value = new Date().toISOString().split('T')[0];
+    const date = dateInput.value;
+
+    const mQuery = Bmob.Query("MemberNames");
+    const members = await mQuery.find();
+    
+    const rQuery = Bmob.Query("PunchRecords");
+    rQuery.equalTo("punchDate", "==", date);
+    const records = await rQuery.find();
+    
+    const recMap = {};
+    records.forEach(r => recMap[r.name] = r.punchTime);
+
+    let html = "";
+    let done = 0;
+    members.forEach(m => {
+      const time = recMap[m.name];
+      if (time) done++;
+      html += `<div class="list-item"><span>${m.name}</span><span>${time ? new Date(time).toLocaleTimeString() : '--'}</span><span class="badge ${time?'badge-done':'badge-none'}">${time?'已打卡':'未打卡'}</span></div>`;
+    });
+    
+    document.getElementById('stat').innerHTML = `<div class="card">总 ${members.length}</div><div class="card">到 ${done}</div>`;
+    document.getElementById('list-container').innerHTML = html || "暂无名单";
+  }
+
+  function initMap() {
+    if (map) return;
+    map = L.map('map').setView([currentLat, currentLng], 15);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    map.on('click', e => {
+      currentLat = e.latlng.lat; currentLng = e.latlng.lng;
+      updateMap();
+    });
+  }
+
+  function updateMap() {
+    if (circle) map.removeLayer(circle);
+    if (marker) map.removeLayer(marker);
+    const r = parseInt(document.getElementById('radius').value);
+    circle = L.circle([currentLat, currentLng], { radius: r }).addTo(map);
+    marker = L.marker([currentLat, currentLng]).addTo(map);
+  }
+
+  async function saveFence() {
+    const r = parseInt(document.getElementById('radius').value);
+    const query = Bmob.Query("FenceConfig");
+    const res = await query.find();
+    let q;
+    if (res.length > 0) {
+      q = Bmob.Query("FenceConfig");
+      q.get(res[0].objectId);
+    } else {
+      q = Bmob.Query("FenceConfig");
+    }
+    q.set("lat", currentLat);
+    q.set("lng", currentLng);
+    q.set("radius", r);
+    await q.save();
+    alert("云端配置已保存！");
+  }
+
+  async function renderMembers() {
+    const query = Bmob.Query("MemberNames");
+    const res = await query.find();
+    let html = res.map(m => `<div class="list-item"><span>${m.name}</span><span style="color:red" onclick="delMember('${m.objectId}')">删除</span></div>`).join("");
+    document.getElementById('member-list').innerHTML = html;
+  }
+
+  async function addMember() {
+    const n = document.getElementById('new-name').value;
+    if (!n) return;
+    const q = Bmob.Query("MemberNames");
+    q.set("name", n);
+    await q.save();
+    renderMembers();
+  }
+
+  async function delMember(id) {
+    if (!confirm('确定删除？')) return;
+    const q = Bmob.Query("MemberNames");
+    await q.destroy(id);
+    renderMembers();
+  }
+</script>
+</body>
+</html>
